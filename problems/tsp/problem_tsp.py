@@ -69,44 +69,27 @@ class TSP(object):
         return TSPDataset(*args, **kwargs)
 
     @staticmethod
-    def make_state(input, node_in=None, node_out=None):
-        return StateTSP.initialize(input, node_in=node_in, node_out=node_out)
+    def make_state(input):
+        return StateTSP.initialize(input)
 
 
 class TSPDataset(Dataset):
 
-    def __init__(
-        self, filename=None, size=50, num_samples=1000000, offset=0, distribution=None
-    ):
+    def __init__(self, filename, num_samples=1000000, offset=0, **kwargs):
         super(TSPDataset, self).__init__()
 
-        self.data_set = []
-        if filename is not None:
-            assert os.path.splitext(filename)[1] == ".pkl"
+        assert os.path.splitext(filename)[1] == ".pkl"
 
-            with open(filename, "rb") as f:
-                data = pickle.load(f)
+        with open(filename, "rb") as f:
+            data = pickle.load(f)
 
-                self.data = [
-                    {
-                        "depot": torch.FloatTensor(depot),
-                        "templates": torch.FloatTensor(templates),
-                    }
-                    for depot, templates in data[offset : offset + num_samples]
-                ]
-
-        else:
-            self.data = [
-                generate_sample(
-                    n_rects=size,
-                    a=0.02,
-                    min_cells=3,
-                    max_cells=9,
-                    margin=0.02,
-                    length_mode="zero",
-                )
-                for _ in range(num_samples)
-            ]
+        self.data = [
+            {
+                "depot": torch.FloatTensor(depot),
+                "templates": torch.FloatTensor(templates),
+            }
+            for depot, templates in data[offset: offset + num_samples]
+        ]
 
         self.size = len(self.data)
 

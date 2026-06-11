@@ -5,10 +5,10 @@ import torch
 
 
 class Config:
-    data_dir = "data"
-    filename = "300_10.pkl"
-    dataset_size = 300
-    graph_size = 10
+    data_dir = ""
+    filename = ""
+    dataset_size = 1000
+    graph_size = 20
     seed = 1234
     overwrite = True
     name = "val"
@@ -90,10 +90,7 @@ def point_inside_any_rect_np(points, rects):
 
 
 def generate_depot_not_inside_rects_fast(rects, rng, max_attempts=10_000, batch_attempts=1024):
-    """
-    Быстрая генерация depot вне прямоугольников.
-    Генерирует точки пачками, а не по одной.
-    """
+    
 
     attempts = 0
 
@@ -124,31 +121,7 @@ def make_templates_for_rect_fast(
     length_mode="zero",
     turn_penalty=None,
 ):
-    """
-    Возвращает:
-        [8, 4] если length_mode == "zero"
-
-        [8, 5] если length_mode == "area" или "coverage"
-
-    length_mode:
-        "zero":
-            template = [x_in, y_in, x_out, y_out]
-
-        "area":
-            template = [x_in, y_in, x_out, y_out, nx * ny * a]
-
-        "coverage":
-            template = [
-                x_in,
-                y_in,
-                x_out,
-                y_out,
-                nx * ny * a + turn_penalty * num_turns
-            ]
-
-    turn_penalty:
-        если None, берём 0.5 * a
-    """
+   
 
     if turn_penalty is None:
         turn_penalty = 0.5 * a
@@ -168,11 +141,9 @@ def make_templates_for_rect_fast(
     pairs = []
     turn_counts = []
 
-    # Templates 1, 4, 5, 8 по твоей логике:
-    # num_turns = nx - 1
+    
     turns_x = nx - 1
 
-    # First 4 templates depend on nx parity
     if nx % 2 == 0:
         pairs.extend([
             (p1, p8),
@@ -190,11 +161,9 @@ def make_templates_for_rect_fast(
 
     turn_counts.extend([turns_x] * 4)
 
-    # Templates 2, 3, 6, 7 по твоей логике:
-    # num_turns = ny - 1
+    
     turns_y = ny - 1
 
-    # Second 4 templates depend on ny parity
     if ny % 2 == 0:
         pairs.extend([
             (p2, p3),
@@ -263,16 +232,7 @@ def generate_sample_fast(
     turn_penalty=None,
     rng=None,
 ):
-    """
-    Быстрая NumPy-версия generate_sample.
-
-    Returns:
-        {
-            "templates": np.ndarray [N, 8, 4] если length_mode == "zero"
-                         np.ndarray [N, 8, 5] если length_mode == "area" или "coverage",
-            "depot": np.ndarray [2]
-        }
-    """
+   
 
     if rng is None:
         rng = np.random.default_rng()
@@ -367,30 +327,7 @@ def generate_tsp_data(
     length_mode="coverage",
     turn_penalty=0.01,
 ):
-    """
-    return:
-        [
-            (
-                depot.tolist(),
-                templates.tolist()
-            ),
-            ...
-        ]
-
-    Если length_mode == "coverage":
-        templates shape = [N, 8, 5]
-
-        template = [
-            x_in,
-            y_in,
-            x_out,
-            y_out,
-            coverage_cost
-        ]
-
-    turn_penalty:
-        если None, внутри make_templates_for_rect_fast берётся 0.5 * a
-    """
+    
 
     rng = np.random.default_rng(seed)
 
@@ -454,5 +391,4 @@ if __name__ == "__main__":
     np.random.seed(opts.seed)
     dataset = generate_tsp_data(opts.dataset_size, opts.graph_size)
 
-   # print(dataset[0])
     save_dataset(dataset, filename)

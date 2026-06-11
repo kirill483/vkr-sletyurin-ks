@@ -1,5 +1,4 @@
 import torch
-import numpy as np
 from torch import nn
 import math
 
@@ -52,13 +51,10 @@ class MultiHeadAttention(nn.Module):
             stdv = 1. / math.sqrt(param.size(-1))
             param.data.uniform_(-stdv, stdv)
 
-    def forward(self, q, h=None, mask=None):
+    def forward(self, q, h=None):
         """
-
         :param q: queries (batch_size, n_query, input_dim)
         :param h: data (batch_size, graph_size, input_dim)
-        :param mask: mask (batch_size, n_query, graph_size) or viewable as that (i.e. can be 2 dim if n_query == 1)
-        Mask should contain 1 if attention is not possible (i.e. mask is negative adjacency)
         :return:
         """
         if h is None:
@@ -87,17 +83,7 @@ class MultiHeadAttention(nn.Module):
         # Calculate compatibility (n_heads, batch_size, n_query, graph_size)
         compatibility = self.norm_factor * torch.matmul(Q, K.transpose(2, 3))
 
-        # Optionally apply mask to prevent attention
-        if mask is not None:
-            mask = mask.view(1, batch_size, n_query, graph_size).expand_as(compatibility)
-            compatibility[mask] = -np.inf
-
         attn = torch.softmax(compatibility, dim=-1)
-
-        if mask is not None:
-            attnc = attn.clone()
-            attnc[mask] = 0
-            attn = attnc
 
         heads = torch.matmul(attn, V)
 
@@ -105,7 +91,6 @@ class MultiHeadAttention(nn.Module):
             heads.permute(1, 2, 0, 3).contiguous().view(-1, self.n_heads * self.val_dim),
             self.W_out.view(-1, self.embed_dim)
         ).view(batch_size, n_query, self.embed_dim)
-
 
         return out
 
@@ -121,13 +106,6 @@ class Normalization(nn.Module):
         }.get(normalization, None)
 
         self.normalizer = normalizer_class(embed_dim, affine=True)
-
-
-    def init_parameters(self):
-
-        for name, param in self.named_parameters():
-            stdv = 1. / math.sqrt(param.size(-1))
-            param.data.uniform_(-stdv, stdv)
 
     def forward(self, input):
 
@@ -175,30 +153,15 @@ class GraphAttentionEncoder(nn.Module):
             n_heads,
             embed_dim,
             n_layers,
-            node_dim=None,
             normalization='batch',
             feed_forward_hidden=512
     ):
         super(GraphAttentionEncoder, self).__init__()
-
-        # To map input to embedding space
-        self.init_embed = nn.Linear(node_dim, embed_dim) if node_dim is not None else None
 
         self.layers = nn.Sequential(*(
             MultiHeadAttentionLayer(n_heads, embed_dim, feed_forward_hidden, normalization)
             for _ in range(n_layers)
         ))
 
-    def forward(self, x, mask=None):
-
-        assert mask is None, "TODO mask not yet supported!"
-
-        # Batch multiply to get initial embeddings of nodes
-        h = self.init_embed(x.view(-1, x.size(-1))).view(*x.size()[:2], -1) if self.init_embed is not None else x
-
-        h = self.layers(h)
-
-        return (
-            h,  # (batch_size, graph_size, embed_dim)
-            h.mean(dim=1),  # average to get embedding of graph, (batch_size, embed_dim)
-        )
+    def forward(self, x):
+        return self.layers(x)

@@ -5,32 +5,14 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 
 
-#MODEL_RESULTS = "results/model_200_20.pkl"
-#ORTOOLS_RESULTS = "results/exact_200_20.pkl"
-#MODEL_RESULTS = "results/200_20_nearest_neighbor_dp_gtsp20.pkl"
+MODEL_RESULTS = "results/model_200_20.pkl"
+EXACT_RESULTS = "results/exact_200_20.pkl"
 
-# Датасет, на котором считались model/or-tools results
-#DATASET_PATH = "data/200_20.pkl"
+DATASET_PATH = "data/200_20.pkl"
 
-#ORTOOLS_RESULTS = "results/200_20_nearest_neighbor_dp_gtsp20.pkl"
-#MODEL_RESULTS = "results/300_10_model.pkl"
-#ORTOOLS_RESULTS = "results/exact_300_10.pkl"
-
-# Датасет, на котором считались model/or-tools results
-DATASET_PATH = "data/300_10.pkl"
-#MODEL_RESULTS= "results/300_10_nearest_neighbor_dp_gtsp20.pkl"
-
-
-MODEL_RESULTS = "results/300_10_model.pkl"
-EXACT_RESULTS = "results/exact_300_10.pkl"
-
-# Датасет, на котором считались model/exact results
-#DATASET_PATH = "data/200_20.pkl"
-
-INSTANCE_ID = 117
+INSTANCE_ID = 39
 N_TEMPLATES = 8
 
-# Ширина покрытия / сторона маленького квадрата
 A = 0.02
 
 
@@ -38,7 +20,6 @@ def load_results(path):
     with open(path, "rb") as f:
         data = pickle.load(f)
 
-    # eval.py sometimes saves (results, parallelism)
     if isinstance(data, tuple) and len(data) == 2:
         data = data[0]
 
@@ -49,18 +30,7 @@ def load_results(path):
 
 
 def unpack_sample(sample):
-    """
-    Поддерживает форматы:
-
-    1)
-        {
-            "depot": Tensor/array [2],
-            "templates": Tensor/array [N, 8, 4] или [N, 8, 5]
-        }
-
-    2)
-        (depot, templates)
-    """
+   
 
     if isinstance(sample, dict):
         depot = sample["depot"]
@@ -75,13 +45,7 @@ def unpack_sample(sample):
 
 
 def coverage_constant(templates):
-    """
-    Константная часть покрытия:
-        sum_i min_m length[i, m]
-
-    Если templates имеют размерность [N, 8, 4],
-    то длины шаблонов нет, значит константа = 0.
-    """
+    
     if templates.shape[-1] < 5:
         return 0.0
 
@@ -92,19 +56,7 @@ def coverage_constant(templates):
 
 
 def decode_tour(pi, n_templates=8):
-    """
-    pi values:
-        1..N*K
-
-    returns:
-        [(field_id, template_id, action_id), ...]
-
-    field_id:
-        0..N-1
-
-    template_id:
-        0..K-1
-    """
+    
 
     decoded = []
 
@@ -121,17 +73,7 @@ def decode_tour(pi, n_templates=8):
 
 
 def get_field_rects_from_templates(templates):
-    """
-    Восстанавливает прямоугольники полей по min/max всех in/out точек шаблонов.
-
-    templates:
-        [N, 8, 4] или [N, 8, 5]
-        [x_in, y_in, x_out, y_out, optional_length]
-
-    returns:
-        list of (x_min, y_min, x_max, y_max)
-    """
-
+    
     rects = []
 
     for field_id in range(templates.shape[0]):
@@ -156,9 +98,7 @@ def get_field_rects_from_templates(templates):
 
 
 def draw_fields(ax, templates):
-    """
-    Рисует только прямоугольники полей, без подписей.
-    """
+    
 
     rects = get_field_rects_from_templates(templates)
 
@@ -175,20 +115,7 @@ def draw_fields(ax, templates):
 
 
 def compute_route_points(depot, templates, pi, n_templates=8):
-    """
-    Строит сегменты маршрута.
-
-    travel_segments:
-        движение между областями:
-            депо -> вход_1
-            выход_1 -> вход_2
-            ...
-            выход_last -> депо
-
-    template_segments:
-        внутри выбранного шаблона:
-            вход_i -> выход_i
-    """
+   
 
     decoded = decode_tour(pi, n_templates)
 
@@ -214,15 +141,7 @@ def compute_route_points(depot, templates, pi, n_templates=8):
 
 
 def route_cost_no_const(depot, templates, pi, n_templates=8):
-    """
-    Пересчитывает стоимость маршрута и вычитает константу покрытия.
-
-    Если templates [N, 8, 4]:
-        cost = только межобластные переходы.
-
-    Если templates [N, 8, 5]:
-        cost = переходы + выбранные длины шаблонов - sum_i min_m length[i,m]
-    """
+   
 
     decoded = decode_tour(pi, n_templates)
 
@@ -254,14 +173,11 @@ def route_cost_no_const(depot, templates, pi, n_templates=8):
 
 
 def draw_arrow(ax, a, b, linewidth=1.2, alpha=0.9, linestyle="-"):
-    """
-    Рисует стрелку между двумя точками.
-    """
+    
 
     a = np.asarray(a, dtype=np.float64)
     b = np.asarray(b, dtype=np.float64)
 
-    # Если точки почти совпадают, стрелку не рисуем
     if np.linalg.norm(b - a) < 1e-12:
         return
 
@@ -281,12 +197,7 @@ def draw_arrow(ax, a, b, linewidth=1.2, alpha=0.9, linestyle="-"):
 
 
 def make_snake_path(rect, in_point, out_point, a=0.02):
-    """
-    Строит приближённую змейку внутри прямоугольника.
-
-    Это только визуализация. Если есть настоящие полилинии покрытия,
-    лучше рисовать их вместо этой приближённой змейки.
-    """
+    
 
     x_min, y_min, x_max, y_max = rect
 
@@ -298,7 +209,6 @@ def make_snake_path(rect, in_point, out_point, a=0.02):
 
     path = []
 
-    # Вертикальная змейка: проходы вдоль y, сдвиг по x
     if dx >= dy:
         x_start = in_point[0]
         x_end = out_point[0]
@@ -316,7 +226,6 @@ def make_snake_path(rect, in_point, out_point, a=0.02):
 
         xs = np.clip(xs, x_min, x_max)
 
-        # Если вход ближе к нижней стороне — первый проход вверх, иначе вниз
         go_up = abs(in_point[1] - y_min) <= abs(in_point[1] - y_max)
 
         path.append(in_point)
@@ -338,7 +247,6 @@ def make_snake_path(rect, in_point, out_point, a=0.02):
         if np.linalg.norm(path[-1] - out_point) > 1e-12:
             path.append(out_point)
 
-    # Горизонтальная змейка: проходы вдоль x, сдвиг по y
     else:
         y_start = in_point[1]
         y_end = out_point[1]
@@ -356,7 +264,6 @@ def make_snake_path(rect, in_point, out_point, a=0.02):
 
         ys = np.clip(ys, y_min, y_max)
 
-        # Если вход ближе к левой стороне — первый проход вправо, иначе влево
         go_right = abs(in_point[0] - x_min) <= abs(in_point[0] - x_max)
 
         path.append(in_point)
@@ -382,12 +289,7 @@ def make_snake_path(rect, in_point, out_point, a=0.02):
 
 
 def plot_route(ax, depot, templates, pi, title, saved_cost_no_const=None):
-    """
-    Рисует:
-        - пустые прямоугольники полей;
-        - депо;
-        - стрелки между выходом прошлого шаблона и входом следующего.
-    """
+    
 
     travel_segments, _ = compute_route_points(depot, templates, pi, N_TEMPLATES)
 
@@ -404,7 +306,6 @@ def plot_route(ax, depot, templates, pi, title, saved_cost_no_const=None):
         zorder=5,
     )
 
-    # Переходы между полями
     for a, b in travel_segments:
         draw_arrow(
             ax,
@@ -417,7 +318,7 @@ def plot_route(ax, depot, templates, pi, title, saved_cost_no_const=None):
     if saved_cost_no_const is None:
         title_text = title
     else:
-        title_text = f"{title}\nстоимость без константы = {saved_cost_no_const:.6f}"
+        title_text = f"{title}\nстоимость  = {saved_cost_no_const:.6f}"
 
     ax.set_title(title_text)
     ax.set_aspect("equal", adjustable="box")
@@ -439,7 +340,6 @@ def main():
 
     const = coverage_constant(templates)
 
-    # Лучше пересчитать cost из маршрута, чтобы точно вычесть правильную константу.
     model_cost_no_const = route_cost_no_const(
         depot,
         templates,
@@ -462,9 +362,9 @@ def main():
     print(f"Константа покрытия:              {const:.6f}")
     print(f"Model cost из файла:             {model_costs[INSTANCE_ID]:.6f}")
     print(f"Exact cost из файла:             {exact_costs[INSTANCE_ID]:.6f}")
-    print(f"Модель без константы:            {model_cost_no_const:.6f}")
-    print(f"Точное решение без константы:    {exact_cost_no_const:.6f}")
-    print(f"Gap без константы:               {gap_no_const:.3f}%")
+    print(f"Модель :            {model_cost_no_const:.6f}")
+    print(f"Точное решение :    {exact_cost_no_const:.6f}")
+    print(f"Gap :               {gap_no_const:.3f}%")
     print(f"Маршрут модели:                  {model_pi}")
     print(f"Точный маршрут:                  {exact_pi}")
 
@@ -489,13 +389,13 @@ def main():
     )
 
     fig.suptitle(
-        f"Экземпляр {INSTANCE_ID} | Gap без константы {gap_no_const:.3f}%",
+        f"Экземпляр {INSTANCE_ID} | Gap  {gap_no_const:.3f}%",
         fontsize=14,
     )
 
     plt.tight_layout()
 
-    out_path = f"route_instance_{INSTANCE_ID}_no_const.png"
+    out_path = f"NEWroute_instance_{INSTANCE_ID}_no_const.png"
     plt.savefig(out_path, dpi=200, bbox_inches="tight")
     print(f"Сохранено в {out_path}")
 

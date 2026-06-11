@@ -3,20 +3,41 @@ import time
 import copy
 
 import torch
-import torch.nn.functional as F
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader
+from tqdm import tqdm
 from scipy.stats import ttest_rel
 
-from train import rollout
+
+def move_to(var, device):
+    if isinstance(var, dict):
+        return {k: move_to(v, device) for k, v in var.items()}
+    return var.to(device)
 
 
 def append_jsonl(path, data):
-    """
-    Appends one JSON object as one line.
-    Used for lightweight training logs.
-    """
     with open(path, "a", encoding="utf-8") as f:
         f.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
+
+
+def to_float(x):
+    if torch.is_tensor(x):
+        return float(x.detach().cpu().item())
+    return float(x)
+
+
+def rollout(model, dataset, opts):
+    model.set_decode_type("greedy")
+    model.eval()
+
+    def eval_model_bat(bat):
+        with torch.no_grad():
+            cost, _ = model(move_to(bat, opts.device))
+        return cost.data.cpu()
+
+    return torch.cat([
+        eval_model_bat(bat)
+        for bat in tqdm(DataLoader(dataset, batch_size=opts.eval_batch_size), disable=opts.no_progress_bar)
+    ], 0)
 
 
 class Baseline(object):
@@ -29,9 +50,6 @@ class Baseline(object):
 
     def eval(self, x, c):
         raise NotImplementedError("Override this method")
-
-    def get_learnable_parameters(self):
-        return []
 
     def epoch_callback(self, model, epoch):
         return False
@@ -72,14 +90,11 @@ class WarmupBaseline(Baseline):
         if self.alpha == 0:
             return self.warmup_baseline.eval(x, c)
 
-        v, l = self.baseline.eval(x, c)
-        vw, lw = self.warmup_baseline.eval(x, c)
+        v = self.baseline.eval(x, c)
+        vw = self.warmup_baseline.eval(x, c)
 
-        # Return convex combination of baseline and loss
-        return (
-            self.alpha * v + (1 - self.alpha) * vw,
-            self.alpha * l + (1 - self.alpha) * lw,
-        )
+        # Convex combination of the two baselines
+        return self.alpha * v + (1 - self.alpha) * vw
 
     def epoch_callback(self, model, epoch):
         # Need to call epoch callback of inner baseline
@@ -99,18 +114,10 @@ class WarmupBaseline(Baseline):
         return baseline_updated
 
     def state_dict(self):
-        # Checkpointing within warmup stage makes no sense, only save inner baseline
         return self.baseline.state_dict()
 
     def load_state_dict(self, state_dict):
-        # Checkpointing within warmup stage makes no sense, only load inner baseline
         self.baseline.load_state_dict(state_dict)
-
-
-class NoBaseline(Baseline):
-
-    def eval(self, x, c):
-        return 0, 0  # No baseline, no loss
 
 
 class ExponentialBaseline(Baseline):
@@ -127,8 +134,8 @@ class ExponentialBaseline(Baseline):
         else:
             v = self.beta * self.v + (1.0 - self.beta) * c.mean()
 
-        self.v = v.detach()  # Detach since we never want to backprop
-        return self.v, 0  # No loss
+        self.v = v.detach()  
+        return self.v
 
     def state_dict(self):
         return {
@@ -147,8 +154,7 @@ class RolloutBaseline(Baseline):
         self.problem = problem
         self.opts = opts
 
-        # Original code mutates opts.val_size here.
-        # Keep this behavior for compatibility.
+        
         self.opts.val_size = 10000
 
         self._update_model(model, epoch, dataset=dataset)
@@ -212,8 +218,7 @@ class RolloutBaseline(Baseline):
                 "duration_sec": float(duration),
             })
 
-        # Need to convert baseline to 2D to prevent converting to double.
-        # See https://discuss.pytorch.org/t/dataloader-gives-double-instead-of-float/717/3
+        
         return BaselineDataset(dataset, baseline_values)
 
     def unwrap_batch(self, batch):
@@ -224,9 +229,7 @@ class RolloutBaseline(Baseline):
         # Single batch, so we do not use rollout function.
         with torch.no_grad():
             v, _ = self.model(x)
-
-        # There is no loss
-        return v, 0
+        return v
 
     def epoch_callback(self, model, epoch):
         """

@@ -1,5 +1,0 @@
-PROBLEM_FILE = /home/kirill/diplom/LCOPYL/glkh_work/gtsp20_200/sample_000134.gtsp
-OUTPUT_TOUR_FILE = /home/kirill/diplom/LCOPYL/glkh_work/gtsp20_200/sample_000134.tour
-RUNS = 1
-TIME_LIMIT = 5
-TRACE_LEVEL = 0

@@ -10,32 +10,20 @@ except Exception:
     njit = None
 
 
-DATASET_PATH = "data/300_10.pkl"
-OUT_PATH = "results/exact_300_10.pkl"
+DATASET_PATH = ""
+OUT_PATH = ""
 
 SCALE = 1_000_000
 INF = np.int64(9_000_000_000_000_000_000 // 4)
 PARENT_NONE = np.uint16(65535)
 
 
-# Ограничитель, чтобы случайно не запустить exact DP на слишком большом числе кластеров.
-# Для m=20, k=5 память примерно: dp ~ 838 MB, parent ~ 209 MB.
+
 MAX_EXACT_FIELDS = 22
 
 
 def compute_real_cost(depot, templates, pi):
-    """
-    depot: [2]
-    templates: [N, K, 5]
-    pi: [N], значения 1..N*K
-
-    Считает реальную float-стоимость маршрута:
-        depot -> input первого шаблона
-        + coverage первого шаблона
-        + output_i -> input_{i+1}
-        + coverage следующих шаблонов
-        + output последнего шаблона -> depot
-    """
+    
 
     n_fields, n_templates, template_dim = templates.shape
     assert template_dim >= 5, "Expected templates with coverage length: [N, K, 5]"
@@ -67,12 +55,7 @@ def compute_real_cost(depot, templates, pi):
 
 
 def build_costs(depot, templates):
-    """
-    Возвращает int64-стоимости:
-        start_cost[f, t] = depot -> template(f,t), включая coverage(f,t)
-        trans_cost[f1,t1,f2,t2] = template(f1,t1) -> template(f2,t2), включая coverage(f2,t2)
-        end_cost[f,t] = template(f,t) -> depot
-    """
+   
 
     n_fields, n_templates, template_dim = templates.shape
     assert template_dim >= 5, "Expected templates with coverage length: [N, K, 5]"
@@ -122,7 +105,6 @@ if NUMBA_AVAILABLE:
             dp[i] = INF
             parent[i] = PARENT_NONE
 
-        # Инициализация: depot -> выбранный шаблон стартового кластера.
         for f in range(m):
             mask = 1 << f
             for t in range(k):
@@ -130,7 +112,6 @@ if NUMBA_AVAILABLE:
                 dp[pos] = start_cost[f, t]
                 parent[pos] = PARENT_NONE
 
-        # Основная динамика по подмножествам кластеров.
         for mask in range(full):
             for last_f in range(m):
                 if (mask & (1 << last_f)) == 0:
@@ -177,10 +158,7 @@ else:
 
 
 def _held_karp_gtsp_python(start_cost, trans_cost, end_cost):
-    """
-    Медленный fallback без numba. Подходит только для маленьких m.
-    Для GTSP20 настоятельно лучше установить numba.
-    """
+    
 
     m, k = start_cost.shape
     full = 1 << m
@@ -249,16 +227,7 @@ def _held_karp_gtsp_python(start_cost, trans_cost, end_cost):
 
 
 def solve_gtsp_exact_dp(depot, templates):
-    """
-    Точный Held-Karp-style DP для GTSP.
-
-    Возвращает:
-        cost_float, pi, status
-
-    status:
-        OPTIMAL — точный оптимум найден
-        ERROR_* — что-то пошло не так
-    """
+   
 
     n_fields, n_templates, template_dim = templates.shape
     assert template_dim >= 5, "Expected templates with coverage length: [N, K, 5]"
@@ -276,7 +245,6 @@ def solve_gtsp_exact_dp(depot, templates):
         if best_f < 0:
             return None, None, "ERROR_NO_SOLUTION"
 
-        # Восстановление маршрута по parent.
         m = n_fields
         k = n_templates
         mask = (1 << m) - 1
@@ -303,28 +271,15 @@ def solve_gtsp_exact_dp(depot, templates):
         )
         best_cost_int, route = _held_karp_gtsp_python(start_cost, trans_cost, end_cost)
 
-    # pi в формате 1..N*K, как в твоём OR-Tools коде.
     pi = [1 + f * n_templates + t for f, t in route]
 
-    # Пересчитываем float-стоимость без округления SCALE, чтобы формат совпадал с эвристическим кодом.
     cost_float = compute_real_cost(depot, templates, pi)
 
     return cost_float, pi, "OPTIMAL"
 
 
 def unpack_sample(sample):
-    """
-    Поддерживает оба формата:
-
-    1) tuple:
-        (depot, templates)
-
-    2) dict:
-        {
-            "depot": depot,
-            "templates": templates
-        }
-    """
+    
 
     if isinstance(sample, dict):
         depot = sample["depot"]

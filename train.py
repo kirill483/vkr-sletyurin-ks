@@ -1,65 +1,188 @@
+#!/usr/bin/env python
+
 import os
-import time
 import json
-from tqdm import tqdm
-import torch
+import time
 import math
+import pprint as pp
 
+import torch
+import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
-from utils.log_utils import log_values
-from utils.functions import move_to
+from problems.tsp.problem_tsp import TSP
+from nets.attention_model import AttentionModel
+from reinforce_baselines import (
+    ExponentialBaseline,
+    RolloutBaseline,
+    WarmupBaseline,
+    rollout,
+    append_jsonl,
+    to_float,
+    move_to,
+)
 
 
-def append_jsonl(path, data):
-    """
-    Appends one JSON object as one line.
-    Safe helper for training logs.
-    """
-    with open(path, "a", encoding="utf-8") as f:
-        f.write(json.dumps(data, ensure_ascii=False, default=str) + "\n")
+class Config:
+    # -------------------------
+    # Data
+    # -------------------------
+    problem = "tsp"
+    graph_size = 20
 
+    batch_size = 512
+    epoch_size = 128000
+    data_distribution = None
 
-def to_float(x):
-    """
-    Converts tensor/scalar to python float for JSON logging.
-    """
-    if torch.is_tensor(x):
-        return float(x.detach().cpu().item())
-    return float(x)
+    train_dataset = "data/5_128000GTSP20_val_seed1234.pkl"
+    baseline_dataset = "data/5_10000GTSP20_val_seed1234.pkl"
+
+    val_size = 400
+    val_dataset = "data/5_400GTSP20_val_seed1234.pkl"
+    eval_batch_size = 1024
+
+    # -------------------------
+    # Model
+    # -------------------------
+    embedding_dim = 128
+    hidden_dim = 128
+    n_encode_layers = 3
+
+    tanh_clipping = 10.0
+    normalization = "batch"
+
+    checkpoint_encoder = False
+
+    # -------------------------
+    # Training
+    # -------------------------
+    lr_model = 1e-4
+    lr_decay = 1.0
+
+    n_epochs = 100
+
+    seed = 1235
+    max_grad_norm = 1.0
+
+    no_cuda = False
+
+    # Baseline: "exponential" / "rollout"
+    baseline = "rollout"
+    exp_beta = 0.8
+    bl_alpha = 0.05
+
+    bl_warmup_epochs = 1
+
+    # -------------------------
+    # Saving
+    # -------------------------
+    output_dir = "outputs"
+    run_name = "=sSUDTRYNEWBEST_1ATTENTION20runtestdeportGTSP20"
+    checkpoint_epochs = 25
+    save_only_updates_after_epoch = 80
+
+    # -------------------------
+    # Logging
+    # -------------------------
+    log_step = 500
+    no_progress_bar = True
+
+    log_jsonl = True
+    log_filename = "train_log.jsonl"
+
 
 
 def get_grad_norm_value(grad_norms, index=0):
-    """
-    grad_norms returned by clip_grad_norms:
-        (grad_norms, grad_norms_clipped)
-
-    Each item is a list over optimizer param groups.
-    """
     try:
-        value = grad_norms[index][0]
-        return to_float(value)
+        return to_float(grad_norms[index][0])
     except Exception:
         return None
+
+
+def clip_grad_norms(param_groups, max_norm=math.inf):
+    grad_norms = [
+        torch.nn.utils.clip_grad_norm_(
+            group["params"],
+            max_norm if max_norm > 0 else math.inf,
+            norm_type=2,
+        )
+        for group in param_groups
+    ]
+    grad_norms_clipped = (
+        [min(g_norm, max_norm) for g_norm in grad_norms] if max_norm > 0 else grad_norms
+    )
+    return grad_norms, grad_norms_clipped
+
+
+
+
+def prepare_config(opts):
+    opts.use_cuda = torch.cuda.is_available() and not opts.no_cuda
+    opts.device = torch.device("cuda:0" if opts.use_cuda else "cpu")
+
+    opts.run_name = f"{opts.run_name}_{time.strftime('%Y%m%dT%H%M%S')}"
+
+    opts.save_dir = os.path.join(
+        opts.output_dir,
+        f"{opts.problem}_{opts.graph_size}",
+        opts.run_name,
+    )
+
+    opts.log_path = os.path.join(opts.save_dir, opts.log_filename)
+
+    if opts.bl_warmup_epochs is None:
+        opts.bl_warmup_epochs = 1 if opts.baseline == "rollout" else 0
+
+    assert opts.epoch_size % opts.batch_size == 0, "epoch_size must be divisible by batch_size"
+    assert opts.bl_warmup_epochs == 0 or opts.baseline == "rollout", \
+        "Warmup baseline is only supported with rollout baseline"
+
+    return opts
+
+
+def build_model(opts, problem):
+    return AttentionModel(
+        opts.embedding_dim,
+        opts.hidden_dim,
+        problem,
+        n_encode_layers=opts.n_encode_layers,
+        mask_inner=True,
+        mask_logits=True,
+        normalization=opts.normalization,
+        tanh_clipping=opts.tanh_clipping,
+        checkpoint_encoder=opts.checkpoint_encoder,
+    ).to(opts.device)
+
+
+def build_baseline(opts, model, problem, baseline_dataset):
+    if opts.baseline == "exponential":
+        baseline = ExponentialBaseline(opts.exp_beta)
+    elif opts.baseline == "rollout":
+        baseline = RolloutBaseline(model, problem, opts, dataset=baseline_dataset)
+    else:
+        assert False, f"Unknown baseline: {opts.baseline}"
+
+    if opts.bl_warmup_epochs > 0:
+        baseline = WarmupBaseline(baseline, opts.bl_warmup_epochs, warmup_exp_beta=opts.exp_beta)
+
+    return baseline
+
+
 
 
 def validate(model, dataset, opts, epoch=None, log=False):
     print("Validating...")
 
     start_time = time.time()
-
     cost = rollout(model, dataset, opts)
     avg_cost = cost.mean()
     std_error = torch.std(cost) / math.sqrt(len(cost))
-
-    print("Validation overall avg_cost: {} +- {}".format(
-        avg_cost,
-        std_error,
-    ))
-
     duration = time.time() - start_time
 
-    if log and getattr(opts, "log_jsonl", False):
+    print("Validation overall avg_cost: {} +- {}".format(avg_cost, std_error))
+
+    if log and opts.log_jsonl:
         append_jsonl(opts.log_path, {
             "type": "validation",
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -73,72 +196,17 @@ def validate(model, dataset, opts, epoch=None, log=False):
     return avg_cost
 
 
-def rollout(model, dataset, opts):
-    # Put in greedy evaluation mode!
-    model.set_decode_type("greedy")
-    model.eval()
-
-    def eval_model_bat(bat):
-        with torch.no_grad():
-            cost, _ = model(move_to(bat, opts.device))
-        return cost.data.cpu()
-
-    return torch.cat([
-        eval_model_bat(bat)
-        for bat in tqdm(
-            DataLoader(dataset, batch_size=opts.eval_batch_size),
-            disable=opts.no_progress_bar,
-        )
-    ], 0)
 
 
-def clip_grad_norms(param_groups, max_norm=math.inf):
-    """
-    Clips the norms for all param groups to max_norm and returns gradient norms before clipping.
-
-    Returns:
-        grad_norms, clipped_grad_norms
-    """
-    grad_norms = [
-        torch.nn.utils.clip_grad_norm_(
-            group["params"],
-            max_norm if max_norm > 0 else math.inf,
-            norm_type=2,
-        )
-        for group in param_groups
-    ]
-
-    grad_norms_clipped = [
-        min(g_norm, max_norm) for g_norm in grad_norms
-    ] if max_norm > 0 else grad_norms
-
-    return grad_norms, grad_norms_clipped
-
-
-def train_epoch(
-    model,
-    optimizer,
-    baseline,
-    lr_scheduler,
-    epoch,
-    val_dataset,
-    train_dataset,
-    problem,
-    tb_logger,
-    opts,
-):
+def train_epoch(model, optimizer, baseline, lr_scheduler, epoch,
+                 val_dataset, train_dataset, problem, opts):
     lr = optimizer.param_groups[0]["lr"]
-
-    print("Start train epoch {}, lr={} for run {}".format(
-        epoch,
-        lr,
-        opts.run_name,
-    ))
+    print("Start train epoch {}, lr={} for run {}".format(epoch, lr, opts.run_name))
 
     step = epoch * (opts.epoch_size // opts.batch_size)
     start_time = time.time()
 
-    if getattr(opts, "log_jsonl", False):
+    if opts.log_jsonl:
         append_jsonl(opts.log_path, {
             "type": "epoch_start",
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -148,105 +216,50 @@ def train_epoch(
             "run_name": opts.run_name,
         })
 
-    if not opts.no_tensorboard:
-        tb_logger.log_value("learnrate_pg0", lr, step)
-
-    # Generate / wrap training data for each epoch
     training_dataset = baseline.wrap_dataset(train_dataset)
+    training_dataloader = DataLoader(training_dataset, batch_size=opts.batch_size, num_workers=1, shuffle=True)
 
-    training_dataloader = DataLoader(
-        training_dataset,
-        batch_size=opts.batch_size,
-        num_workers=1,
-        shuffle=True,
-    )
-
-    # Put model in train mode!
     model.train()
     model.set_decode_type("sampling")
 
     last_train_metrics = None
 
-    for batch_id, batch in enumerate(
-        tqdm(training_dataloader, disable=opts.no_progress_bar)
-    ):
-        last_train_metrics = train_batch(
-            model,
-            optimizer,
-            baseline,
-            epoch,
-            batch_id,
-            step,
-            batch,
-            tb_logger,
-            opts,
-        )
-
+    for batch_id, batch in enumerate(tqdm(training_dataloader, disable=opts.no_progress_bar)):
+        last_train_metrics = train_batch(model, optimizer, baseline, epoch, batch_id, step, batch, opts)
         step += 1
 
     epoch_duration = time.time() - start_time
-
-    print("Finished epoch {}, took {} s".format(
-        epoch,
-        time.strftime("%H:%M:%S", time.gmtime(epoch_duration)),
-    ))
-
-    if hasattr(model, "bias_scale"):
-        print("bias scale:", model.bias_scale.item())
+    print("Finished epoch {}, took {} s".format(epoch, time.strftime("%H:%M:%S", time.gmtime(epoch_duration))))
 
     avg_reward = validate(model, val_dataset, opts, epoch=epoch, log=True)
 
-    if not opts.no_tensorboard:
-        tb_logger.log_value("val_avg_reward", avg_reward, step)
-
-    # Rollout baseline update / candidate comparison happens here.
-    # Важно: epoch_callback должен возвращать True/False.
     baseline_updated = baseline.epoch_callback(model, epoch)
-    distance_alpha = None
     if baseline_updated is None:
         baseline_updated = False
 
-    save_regular_checkpoint = (
-        (opts.checkpoint_epochs != 0 and epoch % opts.checkpoint_epochs == 0)
-        or epoch == opts.n_epochs + 100
-    )
-
-    save_only_updates_after = getattr(opts, "save_only_updates_after_epoch", None)
-
+    save_only_updates_after = opts.save_only_updates_after_epoch
     if save_only_updates_after is not None and epoch >= save_only_updates_after:
         should_save = bool(baseline_updated)
     else:
-        should_save = save_regular_checkpoint
+        should_save = opts.checkpoint_epochs != 0 and epoch % opts.checkpoint_epochs == 0
 
     if should_save:
         print("Saving model and state...")
 
-        if (
-            save_only_updates_after is not None
-            and epoch >= save_only_updates_after
-            and baseline_updated
-        ):
+        if save_only_updates_after is not None and epoch >= save_only_updates_after and baseline_updated:
             checkpoint_name = "epoch-{}-baseline-update.pt".format(epoch)
         else:
             checkpoint_name = "epoch-{}.pt".format(epoch)
 
-        checkpoint_path = os.path.join(
-            opts.save_dir,
-            checkpoint_name,
-        )
+        checkpoint_path = os.path.join(opts.save_dir, checkpoint_name)
 
-        torch.save(
-            {
-                "model": model.state_dict(),
-                "optimizer": optimizer.state_dict(),
-                "rng_state": torch.get_rng_state(),
-                "cuda_rng_state": torch.cuda.get_rng_state_all(),
-                "baseline": baseline.state_dict(),
-            },
-            checkpoint_path,
-        )
+        torch.save({
+            "model": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+            "baseline": baseline.state_dict(),
+        }, checkpoint_path)
 
-        if getattr(opts, "log_jsonl", False):
+        if opts.log_jsonl:
             append_jsonl(opts.log_path, {
                 "type": "checkpoint",
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -257,7 +270,7 @@ def train_epoch(
                 "save_only_updates_after_epoch": save_only_updates_after,
             })
 
-    if getattr(opts, "log_jsonl", False):
+    if opts.log_jsonl:
         epoch_log = {
             "type": "epoch_end",
             "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -266,7 +279,6 @@ def train_epoch(
             "lr": float(lr),
             "epoch_duration_sec": float(epoch_duration),
             "val_avg_cost": to_float(avg_reward),
-            "distance_alpha": float(distance_alpha) if distance_alpha is not None else None,
             "baseline_updated": bool(baseline_updated),
             "checkpoint_saved": bool(should_save),
         }
@@ -276,7 +288,6 @@ def train_epoch(
                 "last_train_avg_cost": last_train_metrics.get("train_avg_cost"),
                 "last_train_loss": last_train_metrics.get("loss"),
                 "last_reinforce_loss": last_train_metrics.get("reinforce_loss"),
-                "last_bl_loss": last_train_metrics.get("bl_loss"),
                 "last_log_likelihood": last_train_metrics.get("log_likelihood"),
                 "last_grad_norm": last_train_metrics.get("grad_norm"),
                 "last_grad_norm_clipped": last_train_metrics.get("grad_norm_clipped"),
@@ -284,42 +295,27 @@ def train_epoch(
 
         append_jsonl(opts.log_path, epoch_log)
 
-    # lr_scheduler should be called at end of epoch
     lr_scheduler.step()
 
 
-def train_batch(
-    model,
-    optimizer,
-    baseline,
-    epoch,
-    batch_id,
-    step,
-    batch,
-    tb_logger,
-    opts,
-):
+def train_batch(model, optimizer, baseline, epoch, batch_id, step, batch, opts):
     x, bl_val = baseline.unwrap_batch(batch)
 
     x = move_to(x, opts.device)
     bl_val = move_to(bl_val, opts.device) if bl_val is not None else None
 
-    # Evaluate model, get costs and log probabilities
     cost, log_likelihood = model(x)
 
-    # Evaluate baseline, get baseline loss if any
-    bl_val, bl_loss = baseline.eval(x, cost) if bl_val is None else (bl_val, 0)
+    if bl_val is None:
+        bl_val = baseline.eval(x, cost)
 
-    # Calculate loss
     reinforce_loss = ((cost - bl_val) * log_likelihood).mean()
-    loss = reinforce_loss + bl_loss
+    loss = reinforce_loss
 
-    # Backward + optimization
     optimizer.zero_grad()
     loss.backward()
 
     grad_norms = clip_grad_norms(optimizer.param_groups, opts.max_grad_norm)
-
     optimizer.step()
 
     metrics = {
@@ -327,28 +323,17 @@ def train_batch(
         "train_std_cost": to_float(cost.std()),
         "loss": to_float(loss),
         "reinforce_loss": to_float(reinforce_loss),
-        "bl_loss": to_float(bl_loss) if torch.is_tensor(bl_loss) else float(bl_loss),
         "log_likelihood": to_float(log_likelihood.mean()),
         "grad_norm": get_grad_norm_value(grad_norms, index=0),
         "grad_norm_clipped": get_grad_norm_value(grad_norms, index=1),
     }
 
-    # Logging
     if step % int(opts.log_step) == 0:
-        log_values(
-            cost,
-            grad_norms,
-            epoch,
-            batch_id,
-            step,
-            log_likelihood,
-            reinforce_loss,
-            bl_loss,
-            tb_logger,
-            opts,
-        )
+        grad_norms_raw, grad_norms_clipped = grad_norms
+        print("epoch: {}, train_batch_id: {}, avg_cost: {}".format(epoch, batch_id, metrics["train_avg_cost"]))
+        print("grad_norm: {}, clipped: {}".format(grad_norms_raw[0], grad_norms_clipped[0]))
 
-        if getattr(opts, "log_jsonl", False):
+        if opts.log_jsonl:
             append_jsonl(opts.log_path, {
                 "type": "train_batch",
                 "time": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -359,3 +344,83 @@ def train_batch(
             })
 
     return metrics
+
+
+
+
+def run(opts):
+    pp.pprint(vars(opts))
+
+    torch.manual_seed(opts.seed)
+    os.makedirs(opts.save_dir, exist_ok=True)
+
+    with open(os.path.join(opts.save_dir, "args.json"), "w", encoding="utf-8") as f:
+        json.dump(vars(opts), f, indent=True, ensure_ascii=False, default=str)
+
+    if opts.log_jsonl:
+        with open(opts.log_path, "w", encoding="utf-8") as f:
+            pass
+
+        append_jsonl(opts.log_path, {
+            "type": "run_start",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_name": opts.run_name,
+            "save_dir": opts.save_dir,
+            "problem": opts.problem,
+            "graph_size": opts.graph_size,
+            "batch_size": opts.batch_size,
+            "epoch_size": opts.epoch_size,
+            "val_size": opts.val_size,
+            "lr_model": opts.lr_model,
+            "lr_decay": opts.lr_decay,
+            "n_epochs": opts.n_epochs,
+            "seed": opts.seed,
+            "baseline": opts.baseline,
+            "device": str(opts.device),
+            "use_cuda": bool(opts.use_cuda),
+        })
+
+    problem = TSP
+
+    model = build_model(opts, problem)
+
+    baseline_dataset = problem.make_dataset(
+        size=opts.graph_size,
+        num_samples=10000,
+        filename=opts.baseline_dataset,
+        distribution=opts.data_distribution,
+    )
+    baseline = build_baseline(opts, model, problem, baseline_dataset)
+
+    optimizer = optim.Adam([{"params": model.parameters(), "lr": opts.lr_model}])
+
+    lr_scheduler = optim.lr_scheduler.LambdaLR(optimizer, lambda epoch: opts.lr_decay ** epoch)
+
+    val_dataset = problem.make_dataset(
+        size=opts.graph_size,
+        num_samples=opts.val_size,
+        filename=opts.val_dataset,
+        distribution=opts.data_distribution,
+    )
+
+    train_dataset = problem.make_dataset(
+        size=opts.graph_size,
+        num_samples=opts.epoch_size,
+        filename=opts.train_dataset,
+        distribution=opts.data_distribution,
+    )
+
+    for epoch in range(opts.n_epochs):
+        train_epoch(model, optimizer, baseline, lr_scheduler, epoch, val_dataset, train_dataset, problem, opts)
+
+    if opts.log_jsonl:
+        append_jsonl(opts.log_path, {
+            "type": "run_end",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "run_name": opts.run_name,
+        })
+
+
+if __name__ == "__main__":
+    opts = prepare_config(Config())
+    run(opts)
